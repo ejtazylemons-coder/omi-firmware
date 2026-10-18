@@ -67,16 +67,16 @@ static ssize_t haptic_write_handler(struct bt_conn *conn,
     LOG_INF("Haptic write received: value %d", value);
 
     // Map received value to haptic duration
-    // 1 -> 100ms, 2 -> 300ms, 3 -> 500ms
+    // 1 -> 40ms, 2 -> 80ms, 3 -> 120ms (shortened: the stock pulses are too strong on the wrist and chest)
     switch (value) {
     case 1:
-        play_haptic_milli(100);
+        play_haptic_milli(40);
         break;
     case 2:
-        play_haptic_milli(300);
+        play_haptic_milli(80);
         break;
     case 3:
-        play_haptic_milli(500);
+        play_haptic_milli(120);
         break;
     default:
         LOG_WRN("Haptic write: Invalid value %d", value);
