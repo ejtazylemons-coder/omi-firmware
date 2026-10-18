@@ -209,7 +209,7 @@ int main(void)
         // Non-critical, continue boot
     } else {
         LOG_INF("Haptic driver initialized");
-        play_haptic_milli(100);
+        play_haptic_milli(40);
     }
 #endif
 
