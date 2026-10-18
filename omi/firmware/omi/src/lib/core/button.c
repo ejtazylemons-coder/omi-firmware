@@ -354,7 +354,7 @@ void turnoff_all()
     is_off = true;
 
 #ifdef CONFIG_OMI_ENABLE_HAPTIC
-    play_haptic_milli(100);
+    play_haptic_milli(40);
     k_msleep(300);
     haptic_off();
 #endif
