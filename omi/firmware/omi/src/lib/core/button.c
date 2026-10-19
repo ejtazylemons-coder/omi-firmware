@@ -13,7 +13,6 @@
 #include <zephyr/sys/poweroff.h>
 
 #include "haptic.h"
-#include "mic.h"
 #include "imu.h"
 #include "led.h"
 #include "mic.h"
