@@ -13,6 +13,7 @@
 #include <zephyr/sys/poweroff.h>
 
 #include "haptic.h"
+#include "mic.h"
 #include "imu.h"
 #include "led.h"
 #include "mic.h"
@@ -218,8 +219,11 @@ void check_button_level(struct k_work *work_item)
     if (event == BUTTON_EVENT_SINGLE_TAP) {
         LOG_INF("single tap detected\n");
         btn_last_event = event;
-
-        notify_tap();
+        /* ejtazylemons fork (2026-10-19): a single tap stays on the pendant. It buzzes 40 ms and writes
+         * the tap marker into the audio (mic_mark_tap) instead of telling the app, which would open its
+         * own voice-question session. Double tap and the power-off hold are unchanged. */
+        play_haptic_milli(40);
+        mic_mark_tap();
     }
 
     // Double tap

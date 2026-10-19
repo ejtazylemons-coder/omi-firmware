@@ -26,4 +26,6 @@ void mic_set_gain(uint8_t gain_level);
 /* True while the mic is in hardware AAD sleep (mic off, waiting for sound).
  * Lets other subsystems (e.g. the status LED) drop to their lowest-power state. */
 bool mic_in_aad_sleep(void);
+/* Tap marker (ejtazylemons fork): write the 200 ms two-tone marker over the next mic samples. */
+void mic_mark_tap(void);
 #endif

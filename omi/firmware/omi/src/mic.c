@@ -89,6 +89,66 @@ static void aad_track_silence(const int16_t *buf, size_t n);
 static int aad_hw_start(void);
 #endif
 
+/* Tap marker (ejtazylemons fork, 2026-10-19). A single tap on the button writes a 200 ms two-tone marker
+ * (1160 Hz + 1700 Hz) over the mic samples, so the server that already receives the audio hears the tap
+ * inside it. The stock app never forwards button taps; the audio stream reaches the server regardless.
+ * The marker is made with two phase accumulators over one 256-entry sine table (no libm), and replaces
+ * the mic samples rather than mixing with them so room noise cannot dilute it. */
+#define TAP_TONE_SAMPLES 3200                        /* 200 ms at 16 kHz */
+#define TAP_TONE_INC1 311385129u                        /* 1160 Hz * 2^32 / 16000 */
+#define TAP_TONE_INC2 456340275u                        /* 1700 Hz * 2^32 / 16000 */
+static const int16_t tap_sine[256] = {              /* 9000 * sin(2 * pi * i / 256) */
+         0,    221,    442,    662,    882,   1102,   1321,   1539,   1756,   1972,   2187,   2400,   2613,   2823,   3032,   3239,
+      3444,   3647,   3848,   4047,   4243,   4436,   4627,   4815,   5000,   5182,   5361,   5537,   5710,   5879,   6044,   6206,
+      6364,   6518,   6669,   6815,   6957,   7095,   7229,   7358,   7483,   7604,   7720,   7831,   7937,   8039,   8136,   8228,
+      8315,   8397,   8474,   8546,   8612,   8674,   8730,   8781,   8827,   8867,   8903,   8932,   8957,   8976,   8989,   8997,
+      9000,   8997,   8989,   8976,   8957,   8932,   8903,   8867,   8827,   8781,   8730,   8674,   8612,   8546,   8474,   8397,
+      8315,   8228,   8136,   8039,   7937,   7831,   7720,   7604,   7483,   7358,   7229,   7095,   6957,   6815,   6669,   6518,
+      6364,   6206,   6044,   5879,   5710,   5537,   5361,   5182,   5000,   4815,   4627,   4436,   4243,   4047,   3848,   3647,
+      3444,   3239,   3032,   2823,   2613,   2400,   2187,   1972,   1756,   1539,   1321,   1102,    882,    662,    442,    221,
+         0,   -221,   -442,   -662,   -882,  -1102,  -1321,  -1539,  -1756,  -1972,  -2187,  -2400,  -2613,  -2823,  -3032,  -3239,
+     -3444,  -3647,  -3848,  -4047,  -4243,  -4436,  -4627,  -4815,  -5000,  -5182,  -5361,  -5537,  -5710,  -5879,  -6044,  -6206,
+     -6364,  -6518,  -6669,  -6815,  -6957,  -7095,  -7229,  -7358,  -7483,  -7604,  -7720,  -7831,  -7937,  -8039,  -8136,  -8228,
+     -8315,  -8397,  -8474,  -8546,  -8612,  -8674,  -8730,  -8781,  -8827,  -8867,  -8903,  -8932,  -8957,  -8976,  -8989,  -8997,
+     -9000,  -8997,  -8989,  -8976,  -8957,  -8932,  -8903,  -8867,  -8827,  -8781,  -8730,  -8674,  -8612,  -8546,  -8474,  -8397,
+     -8315,  -8228,  -8136,  -8039,  -7937,  -7831,  -7720,  -7604,  -7483,  -7358,  -7229,  -7095,  -6957,  -6815,  -6669,  -6518,
+     -6364,  -6206,  -6044,  -5879,  -5710,  -5537,  -5361,  -5182,  -5000,  -4815,  -4627,  -4436,  -4243,  -4047,  -3848,  -3647,
+     -3444,  -3239,  -3032,  -2823,  -2613,  -2400,  -2187,  -1972,  -1756,  -1539,  -1321,  -1102,   -882,   -662,   -442,   -221,
+};
+static atomic_t tap_tone_left = ATOMIC_INIT(0);
+static uint32_t tap_tone_ph1, tap_tone_ph2;
+
+/* Overwrite the first `left` samples of this mono block with the marker (mic thread). */
+static void tap_tone_fill(int16_t *buf, size_t n)
+{
+    atomic_val_t left = atomic_get(&tap_tone_left);
+    if (left <= 0) {
+        return;
+    }
+    size_t m = (size_t) left < n ? (size_t) left : n;
+    for (size_t i = 0; i < m; i++) {
+        buf[i] = (int16_t) (tap_sine[tap_tone_ph1 >> 24] + tap_sine[tap_tone_ph2 >> 24]);
+        tap_tone_ph1 += TAP_TONE_INC1;
+        tap_tone_ph2 += TAP_TONE_INC2;
+    }
+    atomic_sub(&tap_tone_left, (atomic_val_t) m);
+}
+
+void mic_mark_tap(void)
+{
+    tap_tone_ph1 = 0;
+    tap_tone_ph2 = 0;
+    atomic_set(&tap_tone_left, TAP_TONE_SAMPLES);
+#ifdef CONFIG_OMI_ENABLE_T5838_AAD
+    /* A quiet room has the mic in hardware sleep and no frames flowing; wake it the way a sound would. */
+    if (atomic_get(&aad_in_sleep)) {
+        atomic_set(&aad_wake_pending, 1);
+        k_sem_give(&aad_sem);
+    }
+#endif
+    LOG_INF("tap marker queued");
+}
+
 static inline void
 interleaved_stereo_to_mono(const int16_t *restrict interleaved, size_t frames, int16_t *restrict mono_out)
 {
@@ -121,6 +181,7 @@ static void process_audio_buffer(void *buffer, uint32_t size)
     }
 
     interleaved_stereo_to_mono(inter, frames, mono_buffer);
+    tap_tone_fill(mono_buffer, frames);
 
 #ifdef CONFIG_OMI_ENABLE_T5838_AAD
     aad_track_silence(mono_buffer, frames);
