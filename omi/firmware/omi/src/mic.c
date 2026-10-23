@@ -93,10 +93,14 @@ static int aad_hw_start(void);
  * (1160 Hz + 1700 Hz) over the mic samples, so the server that already receives the audio hears the tap
  * inside it. The stock app never forwards button taps; the audio stream reaches the server regardless.
  * The marker is made with two phase accumulators over one 256-entry sine table (no libm), and replaces
- * the mic samples rather than mixing with them so room noise cannot dilute it. */
+ * the mic samples rather than mixing with them so room noise cannot dilute it.
+ * listen-tap (2026-10-23): a double tap writes the same kind of marker at 1400 Hz + 2000 Hz. Both go
+ * through mic_mark(); a new mark restarts the fill, so two marks never interleave into a mixed tone. */
 #define TAP_TONE_SAMPLES 3200                        /* 200 ms at 16 kHz */
 #define TAP_TONE_INC1 311385129u                        /* 1160 Hz * 2^32 / 16000 */
 #define TAP_TONE_INC2 456340275u                        /* 1700 Hz * 2^32 / 16000 */
+#define DOUBLE_TONE_INC1 375809638u                     /* 1400 Hz * 2^32 / 16000 */
+#define DOUBLE_TONE_INC2 536870912u                     /* 2000 Hz * 2^32 / 16000 */
 static const int16_t tap_sine[256] = {              /* 9000 * sin(2 * pi * i / 256) */
          0,    221,    442,    662,    882,   1102,   1321,   1539,   1756,   1972,   2187,   2400,   2613,   2823,   3032,   3239,
       3444,   3647,   3848,   4047,   4243,   4436,   4627,   4815,   5000,   5182,   5361,   5537,   5710,   5879,   6044,   6206,
@@ -115,30 +119,50 @@ static const int16_t tap_sine[256] = {              /* 9000 * sin(2 * pi * i / 2
      -6364,  -6206,  -6044,  -5879,  -5710,  -5537,  -5361,  -5182,  -5000,  -4815,  -4627,  -4436,  -4243,  -4047,  -3848,  -3647,
      -3444,  -3239,  -3032,  -2823,  -2613,  -2400,  -2187,  -1972,  -1756,  -1539,  -1321,  -1102,   -882,   -662,   -442,   -221,
 };
-static atomic_t tap_tone_left = ATOMIC_INIT(0);
+/* Marker state, shared by the button work item (mic_mark) and the mic thread (tap_tone_fill). The fill
+ * works on a copy and writes back only if no new mark arrived meanwhile (same generation). */
+static struct k_spinlock tap_tone_lock;
+static uint32_t tap_tone_left;
 static uint32_t tap_tone_ph1, tap_tone_ph2;
+static uint32_t tap_tone_inc1, tap_tone_inc2;
+static uint32_t tap_tone_gen;
 
 /* Overwrite the first `left` samples of this mono block with the marker (mic thread). */
 static void tap_tone_fill(int16_t *buf, size_t n)
 {
-    atomic_val_t left = atomic_get(&tap_tone_left);
-    if (left <= 0) {
+    k_spinlock_key_t key = k_spin_lock(&tap_tone_lock);
+    uint32_t left = tap_tone_left, ph1 = tap_tone_ph1, ph2 = tap_tone_ph2;
+    uint32_t inc1 = tap_tone_inc1, inc2 = tap_tone_inc2, gen = tap_tone_gen;
+    k_spin_unlock(&tap_tone_lock, key);
+    if (left == 0) {
         return;
     }
     size_t m = (size_t) left < n ? (size_t) left : n;
     for (size_t i = 0; i < m; i++) {
-        buf[i] = (int16_t) (tap_sine[tap_tone_ph1 >> 24] + tap_sine[tap_tone_ph2 >> 24]);
-        tap_tone_ph1 += TAP_TONE_INC1;
-        tap_tone_ph2 += TAP_TONE_INC2;
+        buf[i] = (int16_t) (tap_sine[ph1 >> 24] + tap_sine[ph2 >> 24]);
+        ph1 += inc1;
+        ph2 += inc2;
     }
-    atomic_sub(&tap_tone_left, (atomic_val_t) m);
+    key = k_spin_lock(&tap_tone_lock);
+    if (tap_tone_gen == gen) {
+        tap_tone_left = left - (uint32_t) m;
+        tap_tone_ph1 = ph1;
+        tap_tone_ph2 = ph2;
+    }
+    k_spin_unlock(&tap_tone_lock, key);
 }
 
-void mic_mark_tap(void)
+/* Start a 200 ms marker of two tones (phase increments inc1, inc2), replacing any marker still running. */
+void mic_mark(uint32_t inc1, uint32_t inc2)
 {
+    k_spinlock_key_t key = k_spin_lock(&tap_tone_lock);
     tap_tone_ph1 = 0;
     tap_tone_ph2 = 0;
-    atomic_set(&tap_tone_left, TAP_TONE_SAMPLES);
+    tap_tone_inc1 = inc1;
+    tap_tone_inc2 = inc2;
+    tap_tone_left = TAP_TONE_SAMPLES;
+    tap_tone_gen++;
+    k_spin_unlock(&tap_tone_lock, key);
 #ifdef CONFIG_OMI_ENABLE_T5838_AAD
     /* A quiet room has the mic in hardware sleep and no frames flowing; wake it the way a sound would. */
     if (atomic_get(&aad_in_sleep)) {
@@ -146,7 +170,18 @@ void mic_mark_tap(void)
         k_sem_give(&aad_sem);
     }
 #endif
+}
+
+void mic_mark_tap(void)
+{
+    mic_mark(TAP_TONE_INC1, TAP_TONE_INC2);
     LOG_INF("tap marker queued");
+}
+
+void mic_mark_double(void)
+{
+    mic_mark(DOUBLE_TONE_INC1, DOUBLE_TONE_INC2);
+    LOG_INF("double-tap marker queued");
 }
 
 static inline void

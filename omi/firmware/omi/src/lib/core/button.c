@@ -75,6 +75,15 @@ void check_button_level(struct k_work *work_item);
 
 K_WORK_DELAYABLE_DEFINE(button_work, check_button_level);
 
+/* Second pulse of the double-tap buzz (ejtazylemons fork listen-tap). play_haptic_milli restarts the motor
+ * rather than queueing, so the second 40 ms pulse is scheduled here. */
+static void double_buzz_second(struct k_work *work)
+{
+    play_haptic_milli(40);
+}
+
+K_WORK_DELAYABLE_DEFINE(double_buzz_work, double_buzz_second);
+
 #define DEFAULT_STATE 0
 #define SINGLE_TAP 1
 #define DOUBLE_TAP 2
@@ -229,7 +238,13 @@ void check_button_level(struct k_work *work_item)
     if (event == BUTTON_EVENT_DOUBLE_TAP) {
         LOG_INF("double tap detected\n");
         btn_last_event = event;
-        notify_double_tap();
+        /* ejtazylemons fork listen-tap (2026-10-23): a double tap stays on the pendant too. It buzzes twice
+         * (40 ms, 80 ms gap, 40 ms; the second pulse comes from double_buzz_work so this work item never
+         * sleeps) and writes the double-tap marker (mic_mark_double) instead of telling the app, which would
+         * end its conversation. The server hears it and turns on active listening. */
+        play_haptic_milli(40);
+        k_work_reschedule(&double_buzz_work, K_MSEC(40 + 80));
+        mic_mark_double();
     }
 
     // Long press, one time event
