@@ -158,7 +158,11 @@ static inline void notify_long_tap()
 #define BUTTON_RELEASED 0
 
 #define TAP_THRESHOLD 300     // 300 ms for single tap
-#define DOUBLE_TAP_WINDOW 600 // 600 ms maximum for double-tap
+/* ejtazylemons fork listen-tap (2026-10-23): a double tap is a second press that starts within DOUBLE_TAP_GAP
+ * of the first release, and a single tap is decided only once that gap has passed with no second press.
+ * Stock decided the single tap 300 ms after the first press started, so an ordinary double tap read as a
+ * single tap (one buzz) unless both taps landed inside about 300 ms. */
+#define DOUBLE_TAP_GAP 500    // 500 ms from the first release to the second press
 #define LONG_PRESS_TIME 3000  // 3000 ms for long press (power off)
 
 typedef enum {
@@ -197,7 +201,7 @@ void check_button_level(struct k_work *work_item)
         uint32_t press_duration = (btn_release_time - btn_press_start_time) * BUTTON_CHECK_INTERVAL;
         if (press_duration < TAP_THRESHOLD) {
             if (btn_last_tap_time > 0 &&
-                (current_time - btn_last_tap_time) * BUTTON_CHECK_INTERVAL < DOUBLE_TAP_WINDOW) {
+                (btn_press_start_time - btn_last_tap_time) * BUTTON_CHECK_INTERVAL < DOUBLE_TAP_GAP) {
                 event = BUTTON_EVENT_DOUBLE_TAP;
                 btn_last_tap_time = 0; // Reset double-tap / single-tap detection
             } else {
@@ -209,10 +213,13 @@ void check_button_level(struct k_work *work_item)
     // Check for single tap
     if (btn_state == BUTTON_RELEASED && !btn_is_pressed) {
         uint32_t press_duration = (btn_release_time - btn_press_start_time) * BUTTON_CHECK_INTERVAL;
-        if (press_duration < TAP_THRESHOLD && btn_last_tap_time > 0 &&
-            (current_time - btn_press_start_time) * BUTTON_CHECK_INTERVAL > TAP_THRESHOLD) {
-            event = BUTTON_EVENT_SINGLE_TAP;
-            btn_last_tap_time = 0;
+        if (btn_last_tap_time > 0) {
+            /* A tap is waiting for a possible second one; no release reset until it is decided. */
+            if (press_duration < TAP_THRESHOLD &&
+                (current_time - btn_last_tap_time) * BUTTON_CHECK_INTERVAL >= DOUBLE_TAP_GAP) {
+                event = BUTTON_EVENT_SINGLE_TAP;
+                btn_last_tap_time = 0;
+            }
         } else if ((current_time - btn_press_start_time) * BUTTON_CHECK_INTERVAL > TAP_THRESHOLD) {
             event = BUTTON_EVENT_RELEASE;
         }
