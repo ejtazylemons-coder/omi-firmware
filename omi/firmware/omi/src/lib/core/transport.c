@@ -590,6 +590,78 @@ void broadcast_battery_level(struct k_work *work_item)
 // Connection Callbacks
 //
 
+/* ejtazylemons fork link-buzz (2026-11-19): the pendant has no connection of its own, so when the phone is
+ * gone (switched off, carried away, seized) nothing it hears reaches the server. It now says so by itself:
+ * one long buzz once the phone has been gone for LINK_LOST_DELAY_MS, and three short pulses when the phone is
+ * back after such a buzz. A drop that heals inside the delay is silent, so is a loss on the charger, and so is
+ * the power-off hold. The long buzz cannot be mistaken for a tap (one 40 ms pulse) or a double tap (two). */
+#ifdef CONFIG_OMI_ENABLE_HAPTIC
+#define LINK_LOST_DELAY_MS 20000
+#define LINK_LOST_BUZZ_MS 500
+#define LINK_BACK_PULSES 3
+#define LINK_BACK_PULSE_MS 40
+#define LINK_BACK_GAP_MS 120
+
+static bool link_buzz_armed = false;  // false while the radio is off (boot, power-off hold)
+static bool link_lost_buzzed = false; // the long buzz went out and the phone is not back yet
+static uint8_t link_back_left = 0;
+
+static void link_lost_work_handler(struct k_work *work);
+static void link_back_work_handler(struct k_work *work);
+K_WORK_DELAYABLE_DEFINE(link_lost_work, link_lost_work_handler);
+K_WORK_DELAYABLE_DEFINE(link_back_work, link_back_work_handler);
+
+static void link_lost_work_handler(struct k_work *work)
+{
+    if (!link_buzz_armed || is_connected || is_charging) {
+        return;
+    }
+    link_lost_buzzed = true;
+    LOG_INF("Phone gone for %d ms: lost-connection buzz", LINK_LOST_DELAY_MS);
+    play_haptic_milli(LINK_LOST_BUZZ_MS);
+}
+
+static void link_back_work_handler(struct k_work *work)
+{
+    if (link_back_left == 0) {
+        return;
+    }
+    link_back_left--;
+    play_haptic_milli(LINK_BACK_PULSE_MS);
+    if (link_back_left > 0) {
+        k_work_schedule(&link_back_work, K_MSEC(LINK_BACK_PULSE_MS + LINK_BACK_GAP_MS));
+    }
+}
+
+static void link_buzz_on_connected(void)
+{
+    k_work_cancel_delayable(&link_lost_work);
+    if (link_lost_buzzed) {
+        link_lost_buzzed = false;
+        link_back_left = LINK_BACK_PULSES;
+        k_work_reschedule(&link_back_work, K_MSEC(200));
+    }
+}
+
+static void link_buzz_on_disconnected(void)
+{
+    k_work_cancel_delayable(&link_back_work);
+    link_back_left = 0;
+    if (link_buzz_armed && !link_lost_buzzed) {
+        k_work_reschedule(&link_lost_work, K_MSEC(LINK_LOST_DELAY_MS));
+    }
+}
+
+static void link_buzz_stop(void)
+{
+    link_buzz_armed = false;
+    link_lost_buzzed = false;
+    link_back_left = 0;
+    k_work_cancel_delayable(&link_lost_work);
+    k_work_cancel_delayable(&link_back_work);
+}
+#endif
+
 static void _transport_connected(struct bt_conn *conn, uint8_t err)
 {
     struct bt_conn_info info = {0};
@@ -643,6 +715,9 @@ static void _transport_connected(struct bt_conn *conn, uint8_t err)
     schedule_mtu_recheck();
 
     is_connected = true;
+#ifdef CONFIG_OMI_ENABLE_HAPTIC
+    link_buzz_on_connected();
+#endif
 
     if (IS_ENABLED(CONFIG_SHELL_BT_NUS)) {
         shell_bt_nus_enable(conn);
@@ -672,6 +747,9 @@ static void _transport_disconnected(struct bt_conn *conn, uint8_t err)
     mtu_recheck_attempts = 0;
 
     is_connected = false;
+#ifdef CONFIG_OMI_ENABLE_HAPTIC
+    link_buzz_on_disconnected();
+#endif
 
     if (IS_ENABLED(CONFIG_SHELL_BT_NUS)) {
         shell_bt_nus_disable();
@@ -1256,6 +1334,9 @@ void pusher(void)
 
 int transport_off()
 {
+#ifdef CONFIG_OMI_ENABLE_HAPTIC
+    link_buzz_stop(); // the power-off hold drops the phone on purpose: no lost-connection buzz
+#endif
     // Stop pusher thread when transport is turned off
     atomic_set(&pusher_stop_flag, 1);
     k_sem_give(&tx_queue_sem);
@@ -1415,6 +1496,10 @@ int transport_start()
     }
 
     k_work_schedule(&battery_work, K_MSEC(3000));
+#endif
+
+#ifdef CONFIG_OMI_ENABLE_HAPTIC
+    link_buzz_armed = true; // radio is up: a phone that goes missing from here on gets the buzz
 #endif
 
     // Start pusher
