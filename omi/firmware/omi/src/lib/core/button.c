@@ -162,7 +162,10 @@ static inline void notify_long_tap()
  * of the first release, and a single tap is decided only once that gap has passed with no second press.
  * Stock decided the single tap 300 ms after the first press started, so an ordinary double tap read as a
  * single tap (one buzz) unless both taps landed inside about 300 ms. */
-#define DOUBLE_TAP_GAP 500    // 500 ms from the first release to the second press
+/* tap-gap (2026-11-23): 500 ms was too tight for his pace; a slower double tap read as two single taps, so the
+ * pendant buzzed after the first tap. 800 ms keeps the first tap silent; a single tap confirms 800 ms after
+ * the release instead of 500. */
+#define DOUBLE_TAP_GAP 800    // 800 ms from the first release to the second press
 #define LONG_PRESS_TIME 3000  // 3000 ms for long press (power off)
 
 typedef enum {
